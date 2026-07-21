@@ -324,23 +324,25 @@ function buildRec() {
         interim += t;
       }
     }
-    if (newFinal) lastFinalText += newFinal;
+    if (newFinal) {
+      lastFinalText += newFinal;
+      // Commit each final sentence immediately to thread, then translate
+      const sentence = newFinal.trim();
+      if (sentence) {
+        const msgId = commitMessage(sentence, null); // commit with no translation yet
+        doTranslate(sentence, msgId); // translate and update that message
+      }
+    }
+
     const full = (lastFinalText + interim).trim();
-    dbg('interim: ' + JSON.stringify(interim) + '<br>final: ' + JSON.stringify(newFinal) + '<br>full: ' + JSON.stringify(full) + '<br>targetLangs: ' + targetLangs.length);
+    dbg('interim: ' + JSON.stringify(interim) + '<br>final: ' + JSON.stringify(newFinal) + '<br>full: ' + JSON.stringify(full));
     if (!full) return;
 
     gaugeActive = true;
     setStatus('Speaking detected!', 'var(--live)');
 
     const origEl = document.getElementById('liveOrig');
-    origEl.innerHTML = escHtml(full) + (interim ? '<span class="cursor"></span>' : '');
-
-    // Translate immediately — don't wait for lang detection
-    clearTimeout(liveTransTimeout);
-    const isFinalNow = !!newFinal && !interim;
-    liveTransTimeout = setTimeout(() => {
-      doTranslate(full, isFinalNow);
-    }, isFinalNow ? 100 : 600);
+    origEl.innerHTML = escHtml(interim) + (interim ? '<span class="cursor"></span>' : '');
   };
 
   rec.onend = () => {
@@ -388,20 +390,15 @@ function setDetectedLang(code) {
 }
 
 // ── Translation ────────────────────────────────────────
-async function doTranslate(text, isFinal) {
-  if (!text || !text.trim()) return;
-  if (!isFinal && text === lastTranslatedText) return;
-  lastTranslatedText = text;
-  dbg('translating: ' + JSON.stringify(text.slice(0,40)) + ' final=' + isFinal);
-
-  const transEl = document.getElementById('liveTrans');
-  transEl.innerHTML = '<span style="color:var(--muted2)">Translating<span class="spin"></span></span>';
+async function doTranslate(text, msgId) {
+  if (!text || !text.trim() || !targetLangs.length) return;
+  dbg('translating: ' + JSON.stringify(text.slice(0,50)));
 
   const isMulti = targetLangs.length > 1;
   const targetDesc = targetLangs.map(l => l.name).join(' and ');
   const systemPrompt = isMulti
-    ? `You are a real-time voice translator. Detect the spoken language automatically. Translate the text into each of these languages: ${targetDesc}.\nRespond EXACTLY in this format, one per line:\n${targetLangs.map(l=>`[${l.label}]: <translation here>`).join('\n')}\nNo other text.`
-    : `You are a real-time voice translator. Detect the spoken language automatically and translate it into ${targetDesc}. Return ONLY the translation — no labels, no quotes, no explanation.`;
+    ? 'You are a real-time voice translator. Detect the spoken language automatically. Translate the text into each of these languages: ' + targetDesc + '.\nRespond EXACTLY in this format, one per line:\n' + targetLangs.map(l=>'['+l.label+']: <translation here>').join('\n') + '\nNo other text.'
+    : 'You are a real-time voice translator. Detect the spoken language automatically and translate it into ' + targetDesc + '. Return ONLY the translation. No labels, no quotes, no explanation.';
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -416,128 +413,33 @@ async function doTranslate(text, isFinal) {
     });
     const data = await resp.json();
     const raw = data?.content?.[0]?.text?.trim() || '';
-    dbg('API response: ' + JSON.stringify(raw.slice(0,60)) + ' err=' + JSON.stringify(data.error));
-    currentLiveTrans = raw;
+    dbg('API OK: ' + JSON.stringify(raw.slice(0,80)));
 
-    // Render in live bar
-    if (isMulti) {
-      transEl.innerHTML = parseMultiTrans(raw, true);
-    } else {
-      transEl.textContent = raw;
-    }
-
-    // Commit to thread on final
-    if (isFinal && lastFinalText.trim()) {
-      const textToCommit = lastFinalText.trim();
-      lastFinalText = '';
-      currentLiveTrans = '';
-      lastTranslatedText = '';
-      commitMessage(textToCommit, raw);
-      setTimeout(() => {
-        document.getElementById('liveOrig').textContent = '';
-        document.getElementById('liveTrans').textContent = '';
-      }, 400);
+    const msg = messages.find(m => m.id === msgId);
+    if (msg) {
+      msg.translating = false;
+      if (isMulti) {
+        raw.split('\n').forEach(line => {
+          const m2 = line.match(/^\[(.+?)\]:\s*(.+)$/);
+          if (m2) {
+            const tl = targetLangs.find(l => l.label === m2[1]);
+            if (tl) msg.translations[tl.code] = m2[2].trim();
+          }
+        });
+      } else {
+        msg.translations[targetLangs[0].code] = raw;
+      }
+      renderThread();
+      saveHistory();
     }
   } catch(err) {
-    transEl.textContent = 'Translation error';
-    console.error(err);
+    dbg('API error: ' + err.message);
+    const msg = messages.find(m => m.id === msgId);
+    if (msg) { msg.translating = false; renderThread(); }
   }
 }
 
-function parseMultiTrans(raw, forLiveBar) {
-  const lines = raw.split('\n').filter(l => l.trim());
-  return lines.map(line => {
-    const m = line.match(/^\[(.+?)\]:\s*(.+)$/);
-    if (m) {
-      const tl = targetLangs.find(l => l.label === m[1]);
-      const col = tl ? tl.color : 'var(--text)';
-      return `<div style="margin-bottom:3px"><span style="font-size:.6rem;color:${col};font-family:'JetBrains Mono',monospace;margin-right:4px">${escHtml(m[1])}</span>${escHtml(m[2])}</div>`;
-    }
-    return `<div>${escHtml(line)}</div>`;
-  }).join('');
-}
 
-// ── Commit message ─────────────────────────────────────
-function commitMessage(original, raw) {
-  let translations = {};
-  if (targetLangs.length === 1) {
-    translations[targetLangs[0].code] = raw;
-  } else {
-    raw.split('\n').forEach(line => {
-      const m = line.match(/^\[(.+?)\]:\s*(.+)$/);
-      if (m) {
-        const tl = targetLangs.find(l => l.label === m[1]);
-        if (tl) translations[tl.code] = m[2].trim();
-      }
-    });
-  }
-  messages.push({
-    id: ++msgIdCounter,
-    original,
-    translations,
-    lang: liveDetectedLang || 'Auto',
-    color: liveDetectedColor || COLORS[0],
-    time: new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
-  });
-  renderThread();
-}
-
-// ── Thread render ──────────────────────────────────────
-function renderThread() {
-  const thread = document.getElementById('thread');
-  if (!messages.length) {
-    thread.innerHTML = `<div class="empty"><div class="ei">🎙</div><div class="et">Ready to listen</div><div class="eb">Press the mic. Speech is auto-detected and translated live.</div></div>`;
-    return;
-  }
-  thread.innerHTML = messages.map(msg => {
-    const transBlocks = targetLangs.map(tl => {
-      const text = msg.translations[tl.code] || '—';
-      return `<div style="margin-bottom:5px">
-        ${targetLangs.length > 1 ? `<div style="font-size:.6rem;color:${tl.color};font-family:'JetBrains Mono',monospace;margin-bottom:2px">${tl.label}</div>` : ''}
-        <div class="btrans">${escHtml(text)}</div>
-      </div>`;
-    }).join('');
-
-    const speakBtns = targetLangs.map(tl => {
-      const text = msg.translations[tl.code] || '';
-      if (!text || text === '—') return '';
-      return `<button class="bact sp" data-text="${escHtml(text)}" data-lang="${tl.code}">🔊${targetLangs.length>1?' '+tl.label:''}</button>`;
-    }).join('');
-
-    return `<div class="msg-group" id="msg-${msg.id}">
-      <div class="msg-hdr">
-        <div class="msg-av" style="background:${msg.color}">${(msg.lang||'?')[0].toUpperCase()}</div>
-        <span class="msg-sp" style="color:${msg.color}">${escHtml(msg.lang)}</span>
-        <span class="msg-time">${msg.time}</span>
-      </div>
-      <div class="bstack">
-        <div class="borig">${escHtml(msg.original)}</div>
-        ${transBlocks}
-        <div class="bacts">${speakBtns}<button class="bact" data-copy="${msg.id}">Copy</button></div>
-      </div>
-    </div>`;
-  }).join('');
-
-  thread.querySelectorAll('.bact.sp').forEach(b => b.addEventListener('click', () => {
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(b.dataset.text);
-    u.lang = b.dataset.lang;
-    window.speechSynthesis.speak(u);
-  }));
-  thread.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
-    const msg = messages.find(m => m.id == b.dataset.copy);
-    if (!msg) return;
-    const txt = [msg.original, ...Object.entries(msg.translations).map(([c,t])=>{
-      const l = targetLangs.find(x=>x.code===c);
-      return `[${l?l.label:c}] ${t}`;
-    })].join('\n');
-    navigator.clipboard.writeText(txt).catch(()=>{});
-  }));
-
-  thread.scrollTop = thread.scrollHeight;
-}
-
-// ── Start / stop ───────────────────────────────────────
 async function doStart() {
   if (!SR) {
     alert('Speech recognition requires Chrome on Android, or Safari on iOS 15+.');
@@ -584,9 +486,10 @@ function doStop() {
   clearTimeout(liveTransTimeout);
   if (recognition) { try { recognition.stop(); } catch(e){} recognition = null; }
   stopGauge();
-  // Commit anything pending
-  if (lastFinalText.trim() && currentLiveTrans) {
-    commitMessage(lastFinalText.trim(), currentLiveTrans);
+  // Commit any remaining interim as final
+  if (lastFinalText.trim()) {
+    const id = commitMessage(lastFinalText.trim(), null);
+    doTranslate(lastFinalText.trim(), id);
     lastFinalText = '';
   }
   document.getElementById('micBtn').classList.remove('on');
@@ -597,6 +500,90 @@ function doStop() {
 
 function setMicLabel(t) { document.getElementById('micLabel').textContent = t; }
 document.getElementById('micBtn').addEventListener('click', () => { listening ? doStop() : doStart(); });
+
+// ── Commit message to thread ───────────────────────────
+function commitMessage(original, raw) {
+  const id = ++msgIdCounter;
+  let translations = {};
+  if (raw) {
+    if (targetLangs.length === 1) {
+      translations[targetLangs[0].code] = raw;
+    } else {
+      raw.split('\n').forEach(line => {
+        const m = line.match(/^\[(.+?)\]:\s*(.+)$/);
+        if (m) {
+          const tl = targetLangs.find(l => l.label === m[1]);
+          if (tl) translations[tl.code] = m[2].trim();
+        }
+      });
+    }
+  }
+  messages.push({
+    id, original, translations,
+    translating: !raw && targetLangs.length > 0,
+    lang: liveDetectedLang || 'Detected',
+    color: liveDetectedColor || COLORS[0],
+    time: new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
+  });
+  renderThread();
+  saveHistory();
+  return id;
+}
+
+// ── Render thread ──────────────────────────────────────
+function renderThread() {
+  const thread = document.getElementById('thread');
+  if (!messages.length) {
+    thread.innerHTML = '<div class="empty"><div class="ei">🎙</div><div class="et">Ready to listen</div><div class="eb">Press the mic. Speech is auto-detected and translated live. Previous conversations are saved automatically.</div></div>';
+    return;
+  }
+  thread.innerHTML = messages.map(msg => {
+    const transBlocks = targetLangs.map(tl => {
+      const text = msg.translations[tl.code];
+      const pending = msg.translating || !text;
+      return '<div style="margin-bottom:5px">'
+        + (targetLangs.length > 1 ? '<div style="font-size:.6rem;color:' + tl.color + ';font-family:JetBrains Mono,monospace;margin-bottom:2px">' + tl.label + '</div>' : '')
+        + '<div class="btrans' + (pending ? ' live' : '') + '">'
+        + (pending ? '<span style="color:var(--muted2)">translating<span class="spin"></span></span>' : escHtml(text))
+        + '</div></div>';
+    }).join('');
+
+    const speakBtns = targetLangs.map(tl => {
+      const text = msg.translations[tl.code] || '';
+      if (!text) return '';
+      return '<button class="bact sp" data-text="' + escHtml(text) + '" data-lang="' + tl.code + '">🔊' + (targetLangs.length > 1 ? ' ' + tl.label : '') + '</button>';
+    }).join('');
+
+    return '<div class="msg-group" id="msg-' + msg.id + '">'
+      + '<div class="msg-hdr">'
+      + '<div class="msg-av" style="background:' + msg.color + '">' + (msg.lang||'?')[0].toUpperCase() + '</div>'
+      + '<span class="msg-sp" style="color:' + msg.color + '">' + escHtml(msg.lang) + '</span>'
+      + '<span class="msg-time">' + msg.time + '</span>'
+      + '</div>'
+      + '<div class="bstack">'
+      + '<div class="borig">' + escHtml(msg.original) + '</div>'
+      + (targetLangs.length ? transBlocks : '')
+      + '<div class="bacts">' + speakBtns + '<button class="bact" data-copy="' + msg.id + '">Copy</button></div>'
+      + '</div></div>';
+  }).join('');
+
+  thread.querySelectorAll('.bact.sp').forEach(b => b.addEventListener('click', () => {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(b.dataset.text);
+    u.lang = b.dataset.lang;
+    window.speechSynthesis.speak(u);
+  }));
+  thread.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => {
+    const msg = messages.find(m => m.id == b.dataset.copy);
+    if (!msg) return;
+    const txt = [msg.original, ...Object.entries(msg.translations).map(([c,t]) => {
+      const l = targetLangs.find(x => x.code === c);
+      return '[' + (l ? l.label : c) + '] ' + t;
+    })].join('\n');
+    navigator.clipboard.writeText(txt).catch(() => {});
+  }));
+  thread.scrollTop = thread.scrollHeight;
+}
 
 // ── Language pills ─────────────────────────────────────
 function renderPills() {
@@ -638,7 +625,11 @@ document.getElementById('addLangBtn').addEventListener('click', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
-  if (!messages.length || confirm('Clear conversation?')) { messages = []; renderThread(); }
+  if (!messages.length || confirm('Clear conversation?')) {
+    messages = [];
+    try { localStorage.removeItem('vb_messages'); } catch(e) {}
+    renderThread();
+  }
 });
 document.getElementById('exportBtn').addEventListener('click', () => {
   if (!messages.length) { alert('Nothing to export yet.'); return; }
@@ -655,7 +646,25 @@ document.getElementById('exportBtn').addEventListener('click', () => {
 
 function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
-// Init
+// ── Persistence ───────────────────────────────────────
+function saveHistory() {
+  try {
+    localStorage.setItem('vb_messages', JSON.stringify(messages.slice(-200)));
+  } catch(e) {}
+}
+
+function loadHistory() {
+  try {
+    const saved = localStorage.getItem('vb_messages');
+    if (saved) {
+      messages = JSON.parse(saved);
+      msgIdCounter = messages.reduce((max, m) => Math.max(max, m.id), 0);
+    }
+  } catch(e) {}
+}
+
+// ── Init ───────────────────────────────────────────────
+loadHistory();
 renderPills();
 renderThread();
 </script>
