@@ -243,51 +243,34 @@ function initBars() {
 initBars();
 
 async function startGauge() {
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = audioCtx.createMediaStreamSource(micStream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    analyser.smoothingTimeConstant = 0.75;
-    src.connect(analyser);
-    document.getElementById('gaugeWrap').style.display = 'flex';
-    animateGauge();
-  } catch(e) {
-    console.warn('Gauge unavailable:', e.message);
-  }
+  // Do NOT call getUserMedia here — it conflicts with SpeechRecognition on Android.
+  // Animate bars synthetically to show activity instead.
+  document.getElementById('gaugeWrap').style.display = 'flex';
+  animateGauge();
 }
 
+let gaugePhase = 0;
+let gaugeActive = false; // true when speech result comes in
+
 function animateGauge() {
-  if (!analyser) return;
-  const data = new Uint8Array(analyser.frequencyBinCount);
-  analyser.getByteFrequencyData(data);
+  gaugePhase += 0.18;
   const bars = document.querySelectorAll('.gbar');
-  const step = Math.max(1, Math.floor(data.length / BAR_COUNT));
-  let loudness = 0;
   bars.forEach((b, i) => {
-    // Bell-curve weighting — more visual in middle
-    const centre = Math.abs(i - BAR_COUNT / 2) / (BAR_COUNT / 2);
-    const raw = data[Math.min(i * step, data.length - 1)] || 0;
-    loudness += raw;
-    const boosted = raw * (1 - centre * 0.4);
-    const h = Math.max(3, Math.round((boosted / 255) * 28));
+    const wave = Math.sin(gaugePhase + i * 0.45) * 0.5 + 0.5;
+    const edge = 1 - Math.abs(i - BAR_COUNT / 2) / (BAR_COUNT / 2) * 0.5;
+    const activity = gaugeActive ? 1 : 0.25;
+    const h = Math.max(3, Math.round(wave * edge * activity * 26));
     b.style.height = h + 'px';
-    const pct = boosted / 255;
-    b.style.background = pct < 0.1 ? 'var(--s3)' : pct < 0.45 ? 'var(--accent)' : 'var(--live)';
+    b.style.background = gaugeActive ? (wave > 0.6 ? 'var(--live)' : 'var(--accent)') : 'var(--s3)';
   });
-  const avg = loudness / BAR_COUNT;
   const st = document.getElementById('gaugeStatus');
-  st.textContent = avg < 8 ? 'silence' : avg < 50 ? 'listening…' : 'speaking!';
-  st.style.color = avg < 8 ? 'var(--muted)' : avg < 50 ? 'var(--muted2)' : 'var(--live)';
+  if (!gaugeActive) { st.textContent = 'listening…'; st.style.color = 'var(--muted2)'; }
   gaugeRaf = requestAnimationFrame(animateGauge);
 }
 
 function stopGauge() {
   if (gaugeRaf) { cancelAnimationFrame(gaugeRaf); gaugeRaf = null; }
-  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-  if (audioCtx) { audioCtx.close().catch(()=>{}); audioCtx = null; }
-  analyser = null;
+  gaugeActive = false;
   document.getElementById('gaugeWrap').style.display = 'none';
   document.querySelectorAll('.gbar').forEach(b => { b.style.height = '3px'; b.style.background = 'var(--s3)'; });
   document.getElementById('gaugeStatus').textContent = '';
@@ -311,10 +294,12 @@ function dbg(msg) {
 
 function buildRec() {
   const rec = new SR();
-  rec.continuous = true;
+  // continuous=true blocks onresult on many Android Chrome versions
+  // Use non-continuous and auto-restart instead
+  rec.continuous = false;
   rec.interimResults = true;
   rec.maxAlternatives = 1;
-  rec.lang = 'en-US'; // hardcoded for reliability on Android Chrome
+  rec.lang = 'en-US';
 
   rec.onstart = () => {
     document.getElementById('liveBar').classList.add('show');
@@ -344,6 +329,7 @@ function buildRec() {
     dbg('interim: ' + JSON.stringify(interim) + '<br>final: ' + JSON.stringify(newFinal) + '<br>full: ' + JSON.stringify(full) + '<br>targetLangs: ' + targetLangs.length);
     if (!full) return;
 
+    gaugeActive = true;
     setStatus('Speaking detected!', 'var(--live)');
 
     const origEl = document.getElementById('liveOrig');
@@ -558,19 +544,21 @@ async function doStart() {
     return;
   }
 
-  // Step 1: explicitly request mic permission so user sees the prompt
+  // Request mic permission explicitly so browser shows the prompt
   setMicLabel('Requesting mic permission…');
   try {
-    await navigator.mediaDevices.getUserMedia({audio: true});
+    const testStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    // Release it immediately — SpeechRecognition needs exclusive access on Android
+    testStream.getTracks().forEach(t => t.stop());
   } catch(e) {
     setMicLabel('Mic permission denied — allow mic in browser settings then try again');
     return;
   }
 
-  // Step 2: start gauge (reuses the stream)
+  // Start gauge (synthetic animation, no mic stream)
   startGauge();
 
-  // Step 3: start recognition
+  // Start recognition
   listening = true;
   lastFinalText = '';
   currentLiveTrans = '';
