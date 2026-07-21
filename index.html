@@ -172,6 +172,8 @@ header{
   <div class="live-trans" id="liveTrans"></div>
 </div>
 
+<div id="debugBox" style="background:#1a0a0a;border-top:1px solid #ef444440;padding:8px 14px;font-size:.7rem;font-family:'JetBrains Mono',monospace;color:#ef4444;display:none;max-height:100px;overflow-y:auto;flex-shrink:0"></div>
+
 <div class="mic-zone">
   <div class="gauge-wrap" id="gaugeWrap" style="display:none">
     <div class="gauge-bars" id="gaugeBars"></div>
@@ -301,6 +303,12 @@ function setStatus(msg, color) {
   gs.style.color = color || 'var(--muted2)';
 }
 
+function dbg(msg) {
+  const box = document.getElementById('debugBox');
+  box.style.display = 'block';
+  box.innerHTML = '<b>DEBUG</b><br>' + msg;
+}
+
 function buildRec() {
   const rec = new SR();
   rec.continuous = true;
@@ -332,6 +340,7 @@ function buildRec() {
     }
     if (newFinal) lastFinalText += newFinal;
     const full = (lastFinalText + interim).trim();
+    dbg('interim: ' + JSON.stringify(interim) + '<br>final: ' + JSON.stringify(newFinal) + '<br>full: ' + JSON.stringify(full) + '<br>targetLangs: ' + targetLangs.length);
     if (!full) return;
 
     setStatus('Speaking detected!', 'var(--live)');
@@ -393,9 +402,9 @@ function setDetectedLang(code) {
 // ── Translation ────────────────────────────────────────
 async function doTranslate(text, isFinal) {
   if (!text || !text.trim()) return;
-  // Always translate final results even if text unchanged
   if (!isFinal && text === lastTranslatedText) return;
   lastTranslatedText = text;
+  dbg('translating: ' + JSON.stringify(text.slice(0,40)) + ' final=' + isFinal);
 
   const transEl = document.getElementById('liveTrans');
   transEl.innerHTML = '<span style="color:var(--muted2)">Translating<span class="spin"></span></span>';
@@ -419,6 +428,7 @@ async function doTranslate(text, isFinal) {
     });
     const data = await resp.json();
     const raw = data?.content?.[0]?.text?.trim() || '';
+    dbg('API response: ' + JSON.stringify(raw.slice(0,60)) + ' err=' + JSON.stringify(data.error));
     currentLiveTrans = raw;
 
     // Render in live bar
