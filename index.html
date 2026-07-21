@@ -181,7 +181,7 @@ header{
   </div>
   <div class="mic-row">
     <button class="big-mic" id="micBtn">🎙</button>
-    <div class="mic-label" id="micLabel">Tap to start listening</div>
+    <div class="mic-label" id="micLabel">Tap to start · hold to talk</div>
   </div>
 </div>
 
@@ -297,7 +297,7 @@ function buildRec() {
   // continuous=true blocks onresult on many Android Chrome versions
   // Use non-continuous and auto-restart instead
   rec.continuous = false;
-  rec.interimResults = true;
+  rec.interimResults = false;
   rec.maxAlternatives = 1;
   rec.lang = 'en-US';
 
@@ -311,47 +311,47 @@ function buildRec() {
   };
 
   rec.onresult = (event) => {
-    let interim = '';
-    let newFinal = '';
+    let transcript = '';
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const r = event.results[i];
-      const t = r[0].transcript;
-      if (r.isFinal) {
-        newFinal += t + ' ';
+      if (r.isFinal || !r.isFinal) { // grab everything
+        transcript += r[0].transcript + ' ';
         const detectedCode = r[0].lang || rec.lang || '';
         if (detectedCode) setDetectedLang(detectedCode);
-      } else {
-        interim += t;
       }
     }
-    if (newFinal) {
-      lastFinalText += newFinal;
-      // Commit each final sentence immediately to thread, then translate
-      const sentence = newFinal.trim();
-      if (sentence) {
-        const msgId = commitMessage(sentence, null); // commit with no translation yet
-        doTranslate(sentence, msgId); // translate and update that message
-      }
-    }
+    transcript = transcript.trim();
+    if (!transcript) return;
 
-    const full = (lastFinalText + interim).trim();
-    dbg('interim: ' + JSON.stringify(interim) + '<br>final: ' + JSON.stringify(newFinal) + '<br>full: ' + JSON.stringify(full));
-    if (!full) return;
-
+    dbg('Got: ' + JSON.stringify(transcript));
     gaugeActive = true;
-    setStatus('Speaking detected!', 'var(--live)');
+    setStatus('Got speech!', 'var(--live)');
+
+    lastFinalText += transcript + ' ';
+    const msgId = commitMessage(transcript, null);
+    doTranslate(transcript, msgId);
 
     const origEl = document.getElementById('liveOrig');
-    origEl.innerHTML = escHtml(interim) + (interim ? '<span class="cursor"></span>' : '');
+    origEl.innerHTML = escHtml(transcript);
   };
 
   rec.onend = () => {
+    gaugeActive = false;
     if (listening) {
-      setStatus('Restarting…', 'var(--muted2)');
+      // Brief pause then restart — gives Android time to reset
+      setStatus('Tap mic or keep talking', 'var(--muted2)');
       setTimeout(() => {
-        try { rec.start(); setStatus('Mic active — speak now', 'var(--live)'); }
-        catch(e) { setStatus('Restart failed: ' + e.message, 'var(--danger)'); }
-      }, 200);
+        if (listening) {
+          try {
+            const r2 = buildRec();
+            recognition = r2;
+            r2.start();
+            setStatus('Mic active — speak now', 'var(--live)');
+          } catch(e) {
+            setStatus('Tap mic to retry', 'var(--muted2)');
+          }
+        }
+      }, 300);
     }
   };
 
@@ -477,8 +477,9 @@ async function doStart() {
     stopGauge();
     return;
   }
-  document.getElementById('micBtn').classList.add('on');
-  document.getElementById('micBtn').textContent = '⏹';
+  micBtn.classList.add('on');
+  micBtn.textContent = '⏹';
+  setMicLabel('Listening… speak clearly');
 }
 
 function doStop() {
@@ -499,7 +500,33 @@ function doStop() {
 }
 
 function setMicLabel(t) { document.getElementById('micLabel').textContent = t; }
-document.getElementById('micBtn').addEventListener('click', () => { listening ? doStop() : doStart(); });
+const micBtn = document.getElementById('micBtn');
+let holdTimer = null;
+let isHolding = false;
+
+// Tap = toggle on/off. Hold (500ms) = push-to-talk mode
+micBtn.addEventListener('click', () => {
+  if (isHolding) return; // was a hold, ignore click
+  listening ? doStop() : doStart();
+});
+
+micBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  isHolding = false;
+  holdTimer = setTimeout(() => {
+    isHolding = true;
+    if (!listening) doStart();
+  }, 400);
+}, {passive: false});
+
+micBtn.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  clearTimeout(holdTimer);
+  if (isHolding) {
+    // Push-to-talk: stop on release
+    setTimeout(() => { if (listening) doStop(); isHolding = false; }, 100);
+  }
+}, {passive: false});
 
 // ── Commit message to thread ───────────────────────────
 function commitMessage(original, raw) {
