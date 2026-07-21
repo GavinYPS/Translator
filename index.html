@@ -314,7 +314,7 @@ function buildRec() {
   rec.continuous = true;
   rec.interimResults = true;
   rec.maxAlternatives = 1;
-  rec.lang = navigator.language || 'en-GB';
+  rec.lang = 'en-US'; // hardcoded for reliability on Android Chrome
 
   rec.onstart = () => {
     document.getElementById('liveBar').classList.add('show');
@@ -322,6 +322,7 @@ function buildRec() {
     document.getElementById('liveSp').textContent = 'detecting…';
     document.getElementById('liveSp').style.color = 'var(--muted2)';
     setStatus('Mic active — speak now', 'var(--live)');
+    dbg('Recognition started. lang=' + rec.lang + ' SR=' + (!!window.SpeechRecognition || !!window.webkitSpeechRecognition));
   };
 
   rec.onresult = (event) => {
@@ -370,6 +371,7 @@ function buildRec() {
     console.warn('SR error:', e.error);
     if (e.error === 'no-speech') {
       setStatus('No speech — keep talking', 'var(--muted2)');
+      dbg('no-speech error fired');
       return;
     }
     if (e.error === 'not-allowed' || e.error === 'permission-denied') {
