@@ -339,12 +339,12 @@ function buildRec() {
     const origEl = document.getElementById('liveOrig');
     origEl.innerHTML = escHtml(full) + (interim ? '<span class="cursor"></span>' : '');
 
+    // Translate immediately — don't wait for lang detection
     clearTimeout(liveTransTimeout);
-    if (full !== lastTranslatedText) {
-      liveTransTimeout = setTimeout(() => {
-        doTranslate(full, !interim && !!newFinal);
-      }, 480);
-    }
+    const isFinalNow = !!newFinal && !interim;
+    liveTransTimeout = setTimeout(() => {
+      doTranslate(full, isFinalNow);
+    }, isFinalNow ? 100 : 600);
   };
 
   rec.onend = () => {
@@ -392,7 +392,9 @@ function setDetectedLang(code) {
 
 // ── Translation ────────────────────────────────────────
 async function doTranslate(text, isFinal) {
-  if (!text || !targetLangs.length) return;
+  if (!text || !text.trim()) return;
+  // Always translate final results even if text unchanged
+  if (!isFinal && text === lastTranslatedText) return;
   lastTranslatedText = text;
 
   const transEl = document.getElementById('liveTrans');
@@ -428,10 +430,11 @@ async function doTranslate(text, isFinal) {
 
     // Commit to thread on final
     if (isFinal && lastFinalText.trim()) {
-      commitMessage(lastFinalText.trim(), raw);
+      const textToCommit = lastFinalText.trim();
       lastFinalText = '';
       currentLiveTrans = '';
       lastTranslatedText = '';
+      commitMessage(textToCommit, raw);
       setTimeout(() => {
         document.getElementById('liveOrig').textContent = '';
         document.getElementById('liveTrans').textContent = '';
