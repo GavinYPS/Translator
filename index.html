@@ -340,11 +340,7 @@ async function whisperTranscribe(blob){
 
 // Ask LLaMA to split transcript into speaker turns
 async function diariseWithLLM(transcript){
-  const sys = `You are a conversation analyst. The user will give you a transcript of multiple people speaking. 
-Split it into speaker turns. Label speakers as Speaker 1, Speaker 2, etc. consistently.
-Respond ONLY as JSON array, no other text:
-[{"speaker":"Speaker 1","text":"what they said"},{"speaker":"Speaker 2","text":"what they said"}]
-If you cannot distinguish speakers, return [{"speaker":"Speaker 1","text":"${transcript}"}]`;
+  const sys = 'You are a conversation analyst. The user will give you a transcript of multiple people speaking. Split it into speaker turns. Label speakers as Speaker 1, Speaker 2, etc. consistently. Respond ONLY as a JSON array, no markdown, no other text. Format: [{"speaker":"Speaker 1","text":"..."},{"speaker":"Speaker 2","text":"..."}]. If you cannot distinguish speakers, put everything under Speaker 1.';
 
   try{
     const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
@@ -370,13 +366,9 @@ async function translateText(text, msgId){
   const isMulti=targetLangs.length>1;
   const targetDesc=targetLangs.map(l=>l.name).join(' and ');
   const sys=isMulti
-    ?`Translate the text into each of these languages: ${targetDesc}.
-Respond ONLY in this exact format:
-${targetLangs.map(l=>`[${l.label}]: <translation>`).join('
-')}
-No other text.`
-    :`Translate into ${targetDesc}. Return ONLY the translation, nothing else.`;
-  try{
+    ?('Translate the text into each of these languages: '+targetDesc+'.\nRespond ONLY in this exact format:\n'+targetLangs.map(l=>'['+l.label+']: <translation>').join('\n')+'\nNo other text.')
+    :('Translate into '+targetDesc+'. Return ONLY the translation, nothing else.');
+    try{
     const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+GROQ_KEY},
@@ -511,15 +503,15 @@ document.getElementById('addLangBtn').addEventListener('click',()=>{
 // ── Persist ─────────────────────────────────────────────
 function saveHistory(){
   try{
-    localStorage.setItem('vb3',JSON.stringify(messages.slice(-200)));
-    localStorage.setItem('vb3_langs',JSON.stringify(targetLangs));
+    localStorage.setItem('vb4',JSON.stringify(messages.slice(-200)));
+    localStorage.setItem('vb4_langs',JSON.stringify(targetLangs));
   }catch(e){}
 }
 function loadHistory(){
   try{
-    const s=localStorage.getItem('vb3');
+    const s=localStorage.getItem('vb4');
     if(s){messages=JSON.parse(s);msgId=messages.reduce((mx,m)=>Math.max(mx,m.id),0);}
-    const l=localStorage.getItem('vb3_langs');
+    const l=localStorage.getItem('vb4_langs');
     if(l){const parsed=JSON.parse(l);if(parsed&&parsed.length)targetLangs=parsed;}
   }catch(e){}
   // Always ensure at least English
@@ -530,7 +522,7 @@ function loadHistory(){
 
 document.getElementById('clearBtn').addEventListener('click',()=>{
   if(!messages.length||confirm('Clear conversation?')){messages=[];
-    try{localStorage.removeItem('vb3');localStorage.removeItem('vb3_langs');}catch(e){}
+    try{localStorage.removeItem('vb4');localStorage.removeItem('vb4_langs');}catch(e){}
     targetLangs=[{code:'en-GB',label:'English',name:'English',color:COLORS[0]}];
     renderPills();renderThread();}
 });
@@ -554,6 +546,8 @@ diarBtn.addEventListener('click',()=>{
     :'Hold while speaking · release when done');
 });
 
+// Wipe any old cached state from previous versions
+try{['vb2','vb3','vb3_langs'].forEach(k=>localStorage.removeItem(k));}catch(e){}
 loadHistory();renderPills();renderThread();
 </script>
 </body>
