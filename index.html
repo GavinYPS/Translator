@@ -491,7 +491,7 @@ function renderPills(){
   const p=document.getElementById('langPills');
   if(!targetLangs.length){p.innerHTML='<span style="font-size:.72rem;color:var(--muted);font-style:italic">none — transcription only</span>';return;}
   p.innerHTML=targetLangs.map(l=>'<div class="lpill"><span class="lpill-dot" style="background:'+l.color+'"></span><span class="lpill-label">'+l.label+'</span><button class="lpill-rm" data-code="'+l.code+'">✕</button></div>').join('');
-  p.querySelectorAll('.lpill-rm').forEach(b=>b.addEventListener('click',()=>{targetLangs=targetLangs.filter(l=>l.code!==b.dataset.code);renderPills();}));
+  p.querySelectorAll('.lpill-rm').forEach(b=>b.addEventListener('click',()=>{targetLangs=targetLangs.filter(l=>l.code!==b.dataset.code);renderPills();saveHistory();}));
 }
 document.getElementById('addLangBtn').addEventListener('click',()=>{
   const used=targetLangs.map(l=>l.code);
@@ -501,7 +501,7 @@ document.getElementById('addLangBtn').addEventListener('click',()=>{
   ov.innerHTML='<div class="picker"><div class="picker-title">Add language</div><div class="picker-list">'+avail.map(l=>'<button class="picker-item" data-code="'+l.code+'">'+l.label+'</button>').join('')+'</div><button class="picker-close">Cancel</button></div>';
   ov.querySelectorAll('.picker-item').forEach(b=>b.addEventListener('click',()=>{
     const f=ALL_LANGS.find(l=>l.code===b.dataset.code);
-    if(f){targetLangs.push({...f,color:COLORS[targetLangs.length%COLORS.length]});renderPills();}
+    if(f){targetLangs.push({...f,color:COLORS[targetLangs.length%COLORS.length]});renderPills();saveHistory();}
     document.body.removeChild(ov);
   }));
   ov.querySelector('.picker-close').addEventListener('click',()=>document.body.removeChild(ov));
@@ -509,11 +509,30 @@ document.getElementById('addLangBtn').addEventListener('click',()=>{
 });
 
 // ── Persist ─────────────────────────────────────────────
-function saveHistory(){try{localStorage.setItem('vb3',JSON.stringify(messages.slice(-200)));}catch(e){}}
-function loadHistory(){try{const s=localStorage.getItem('vb3');if(s){messages=JSON.parse(s);msgId=messages.reduce((mx,m)=>Math.max(mx,m.id),0);}}catch(e){}}
+function saveHistory(){
+  try{
+    localStorage.setItem('vb3',JSON.stringify(messages.slice(-200)));
+    localStorage.setItem('vb3_langs',JSON.stringify(targetLangs));
+  }catch(e){}
+}
+function loadHistory(){
+  try{
+    const s=localStorage.getItem('vb3');
+    if(s){messages=JSON.parse(s);msgId=messages.reduce((mx,m)=>Math.max(mx,m.id),0);}
+    const l=localStorage.getItem('vb3_langs');
+    if(l){const parsed=JSON.parse(l);if(parsed&&parsed.length)targetLangs=parsed;}
+  }catch(e){}
+  // Always ensure at least English
+  if(!targetLangs.length){
+    targetLangs=[{code:'en-GB',label:'English',name:'English',color:COLORS[0]}];
+  }
+}
 
 document.getElementById('clearBtn').addEventListener('click',()=>{
-  if(!messages.length||confirm('Clear conversation?')){messages=[];try{localStorage.removeItem('vb3');}catch(e){}renderThread();}
+  if(!messages.length||confirm('Clear conversation?')){messages=[];
+    try{localStorage.removeItem('vb3');localStorage.removeItem('vb3_langs');}catch(e){}
+    targetLangs=[{code:'en-GB',label:'English',name:'English',color:COLORS[0]}];
+    renderPills();renderThread();}
 });
 document.getElementById('exportBtn').addEventListener('click',()=>{
   if(!messages.length){alert('Nothing to export.');return;}
