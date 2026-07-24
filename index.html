@@ -112,6 +112,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:12p
     </div>
   </div>
   <div class="hbtns">
+    <button class="hbtn" id="diarBtn" title="Toggle speaker detection">👥 Off</button>
     <button class="hbtn" id="clearBtn" style="color:#ef444490;border-color:#ef444440">Clear</button>
     <button class="hbtn" id="exportBtn">Export</button>
   </div>
@@ -170,7 +171,7 @@ const COLORS=['#4f8ef7','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#f973
 let targetLangs=[
   {code:'en-GB',label:'English',name:'English',color:COLORS[0]},
 ];
-let messages=[],msgId=0,isRecording=false,isProcessing=false;
+let messages=[],msgId=0,isRecording=false,isProcessing=false,diarise=false;
 let mediaRecorder=null,audioChunks=[],micStream=null;
 let audioCtx=null,analyser=null,gaugeRaf=null;
 const BAR_N=20;
@@ -275,16 +276,17 @@ async function endSpeak(){
       isProcessing=false;return;
     }
 
-    const transcript=await whisperTranscribe(blob);
+    const result=await whisperTranscribe(blob);
 
-    if(!transcript){
+    if(!result||(Array.isArray(result)&&!result.length)){
       setStatus('Could not transcribe — try again','');
       setBtnState('');setHint('Hold while speaking · release when done');
       isProcessing=false;return;
     }
 
-    setStatus('"'+transcript.slice(0,60)+(transcript.length>60?'…':'')+'"','proc');
-    await commitAndTranslate(transcript);
+    const preview=Array.isArray(result)?result.map(r=>r.speaker+': '+r.text).join(' / '):result;
+    setStatus('"'+preview.slice(0,60)+(preview.length>60?'…':'')+'"','proc');
+    await commitAndTranslate(result);
     isProcessing=false;
     setBtnState('');
     setStatus('Done — hold to speak again','ready');
@@ -295,14 +297,20 @@ async function endSpeak(){
 }
 
 // ── Whisper via Groq ────────────────────────────────────
+// Returns string (single mode) or array of {speaker, text} (diarise mode)
 async function whisperTranscribe(blob){
   const form=new FormData();
-  // Groq needs a filename with extension
   const ext=blob.type.includes('ogg')?'ogg':blob.type.includes('mp4')?'mp4':'webm';
   form.append('file',blob,'audio.'+ext);
   form.append('model','whisper-large-v3-turbo');
-  form.append('response_format','json');
-  // No language param = auto-detect
+
+  if(diarise){
+    // Verbose JSON gives us word-level timestamps we can use for speaker splits
+    // Groq doesn't support diarisation natively so we use verbose_json + ask LLaMA to split
+    form.append('response_format','verbose_json');
+  } else {
+    form.append('response_format','json');
+  }
 
   try{
     const resp=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{
@@ -312,55 +320,77 @@ async function whisperTranscribe(blob){
     });
     const data=await resp.json();
     if(data.error){
-      console.error('Groq error:',data.error);
       setStatus('Whisper error: '+data.error.message,'');
       return null;
     }
-    return data.text||null;
+
+    if(!diarise) return data.text||null;
+
+    // Diarise mode: send transcript to LLaMA to split into speakers
+    const fullText = data.text||'';
+    if(!fullText) return null;
+    setStatus('Detecting speakers…','proc');
+    return await diariseWithLLM(fullText);
+
   }catch(e){
-    console.error('Groq fetch error:',e);
     setStatus('Network error — check connection','');
     return null;
   }
 }
 
-// ── Translate via Claude ────────────────────────────────
-async function commitAndTranslate(transcript){
-  const id=++msgId;
-  const color=COLORS[(id-1)%COLORS.length];
-  messages.push({
-    id,original:transcript,translations:{},
-    translating:targetLangs.length>0,
-    lang:'Auto',color,
-    time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
-  });
-  renderThread();
-
-  if(!targetLangs.length){
-    messages[messages.length-1].translating=false;
-    renderThread();saveHistory();return;
-  }
-
-  const isMulti=targetLangs.length>1;
-  const targetDesc=targetLangs.map(l=>l.name).join(' and ');
-  const sys=isMulti
-    ?`Translate the text into each of these languages: ${targetDesc}.\nRespond ONLY in this exact format:\n${targetLangs.map(l=>`[${l.label}]: <translation>`).join('\n')}\nNo other text.`
-    :`Translate into ${targetDesc}. Return ONLY the translation, nothing else.`;
+// Ask LLaMA to split transcript into speaker turns
+async function diariseWithLLM(transcript){
+  const sys = `You are a conversation analyst. The user will give you a transcript of multiple people speaking. 
+Split it into speaker turns. Label speakers as Speaker 1, Speaker 2, etc. consistently.
+Respond ONLY as JSON array, no other text:
+[{"speaker":"Speaker 1","text":"what they said"},{"speaker":"Speaker 2","text":"what they said"}]
+If you cannot distinguish speakers, return [{"speaker":"Speaker 1","text":"${transcript}"}]`;
 
   try{
     const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+GROQ_KEY},
-      body:JSON.stringify({model:'llama-3.3-70b-versatile',max_tokens:600,messages:[{role:'system',content:sys},{role:'user',content:transcript}]})
+      body:JSON.stringify({model:'llama-3.3-70b-versatile',max_tokens:1000,
+        messages:[{role:'system',content:sys},{role:'user',content:transcript}]})
     });
     const data=await resp.json();
     const raw=data?.choices?.[0]?.message?.content?.trim()||'';
-    const msg=messages.find(m=>m.id===id);
+    // Parse JSON, strip markdown fences if present
+    const clean=raw.replace(/```json|```/g,'').trim();
+    return JSON.parse(clean); // array of {speaker, text}
+  }catch(e){
+    // Fallback to single speaker
+    return [{speaker:'Speaker 1',text:transcript}];
+  }
+}
+
+// ── Translate via Groq LLaMA ───────────────────────────
+async function translateText(text, msgId){
+  if(!targetLangs.length) return;
+  const isMulti=targetLangs.length>1;
+  const targetDesc=targetLangs.map(l=>l.name).join(' and ');
+  const sys=isMulti
+    ?`Translate the text into each of these languages: ${targetDesc}.
+Respond ONLY in this exact format:
+${targetLangs.map(l=>`[${l.label}]: <translation>`).join('
+')}
+No other text.`
+    :`Translate into ${targetDesc}. Return ONLY the translation, nothing else.`;
+  try{
+    const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+GROQ_KEY},
+      body:JSON.stringify({model:'llama-3.3-70b-versatile',max_tokens:600,
+        messages:[{role:'system',content:sys},{role:'user',content:text}]})
+    });
+    const data=await resp.json();
+    const raw=data?.choices?.[0]?.message?.content?.trim()||'';
+    const msg=messages.find(m=>m.id===msgId);
     if(msg){
       msg.translating=false;
       if(isMulti){
         targetLangs.forEach(tl=>{
-          const re=new RegExp('\\['+tl.label+'\\]:\\s*(.+)','i');
+          const re=new RegExp('\['+tl.label+'\]:\s*(.+)','i');
           const m=raw.match(re);
           msg.translations[tl.code]=m?m[1].trim():raw;
         });
@@ -370,8 +400,37 @@ async function commitAndTranslate(transcript){
       renderThread();saveHistory();
     }
   }catch(e){
-    const msg=messages.find(m=>m.id===id);
-    if(msg){msg.translating=false;msg.translations[targetLangs[0]?.code||'x']='Translation error';renderThread();}
+    const msg=messages.find(m=>m.id===msgId);
+    if(msg){msg.translating=false;msg.translations[targetLangs[0]?.code||'x']='Error';renderThread();}
+  }
+}
+
+// Handles both single string and diarised array [{speaker,text}]
+async function commitAndTranslate(result){
+  const turns = Array.isArray(result) ? result : [{speaker:'Auto', text:result}];
+
+  // Assign consistent colours to speakers
+  const speakerColors={};
+  let colorIdx=msgId%COLORS.length;
+  turns.forEach(t=>{
+    if(!speakerColors[t.speaker]){
+      speakerColors[t.speaker]=COLORS[colorIdx%COLORS.length];
+      colorIdx++;
+    }
+  });
+
+  // Commit all turns as separate messages
+  for(const turn of turns){
+    const id=++msgId;
+    messages.push({
+      id, original:turn.text,
+      translations:{}, translating:targetLangs.length>0,
+      lang:turn.speaker, color:speakerColors[turn.speaker],
+      time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),
+    });
+    renderThread();
+    if(targetLangs.length) translateText(turn.text, id);
+    else { messages[messages.length-1].translating=false; renderThread(); saveHistory(); }
   }
 }
 
@@ -463,6 +522,18 @@ document.getElementById('exportBtn').addEventListener('click',()=>{
 });
 
 function escHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+// ── Diarisation toggle ──────────────────────────────────
+const diarBtn=document.getElementById('diarBtn');
+diarBtn.addEventListener('click',()=>{
+  diarise=!diarise;
+  diarBtn.textContent='👥 '+(diarise?'On':'Off');
+  diarBtn.style.color=diarise?'var(--live)':'';
+  diarBtn.style.borderColor=diarise?'var(--live)':'';
+  setHint(diarise
+    ?'Multi-speaker mode — hold and let everyone speak, release when done'
+    :'Hold while speaking · release when done');
+});
 
 loadHistory();renderPills();renderThread();
 </script>
