@@ -195,36 +195,27 @@ const BAR_N=20;
   for(let i=0;i<BAR_N;i++){const b=document.createElement('div');b.className='gbar';g.appendChild(b);}
 })();
 
-function startGauge(stream){
-  try{
-    audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    const src=audioCtx.createMediaStreamSource(stream);
-    analyser=audioCtx.createAnalyser();
-    analyser.fftSize=64; analyser.smoothingTimeConstant=0.75;
-    src.connect(analyser);
-    const data=new Uint8Array(analyser.frequencyBinCount);
-    const bars=document.querySelectorAll('.gbar');
-    const step=Math.max(1,Math.floor(data.length/BAR_N));
-    function draw(){
-      analyser.getByteFrequencyData(data);
-      bars.forEach((b,i)=>{
-        const v=data[i*step]||0;
-        const edge=1-Math.abs(i-BAR_N/2)/(BAR_N/2)*0.4;
-        const h=Math.max(2,Math.round(v/255*16*edge));
-        b.style.height=h+'px';
-        b.style.background=v>100?'var(--live)':v>30?'var(--accent)':'var(--s3)';
-      });
-      gaugeRaf=requestAnimationFrame(draw);
-    }
-    draw();
-  }catch(e){}
+let gaugePhase=0;
+function startSyntheticGauge(){
+  gaugePhase=0;
+  const bars=document.querySelectorAll('.gbar');
+  function draw(){
+    gaugePhase+=0.22;
+    bars.forEach((b,i)=>{
+      const wave=Math.sin(gaugePhase+i*0.5)*0.5+0.5;
+      const edge=1-Math.abs(i-BAR_N/2)/(BAR_N/2)*0.45;
+      const h=Math.max(2,Math.round(wave*edge*16));
+      b.style.height=h+'px';
+      b.style.background=wave>0.65?'var(--live)':'var(--accent)';
+    });
+    gaugeRaf=requestAnimationFrame(draw);
+  }
+  draw();
 }
 
 function stopGauge(){
   if(gaugeRaf){cancelAnimationFrame(gaugeRaf);gaugeRaf=null;}
   document.querySelectorAll('.gbar').forEach(b=>{b.style.height='2px';b.style.background='var(--s3)';});
-  if(analyser){analyser=null;}
-  if(audioCtx){audioCtx.close().catch(()=>{});audioCtx=null;}
 }
 
 // ── Status ─────────────────────────────────────────────
@@ -262,19 +253,10 @@ function beginSpeak(){
   setStatus('Listening… speak now','rec');
   setHint('Release the button when you finish speaking');
 
-  // Get mic for gauge only — release before SR starts
-  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}})
-    .then(stream=>{
-      micStream=stream;
-      startGauge(stream);
-      // Start SR after gauge init — slight delay ensures mic permission is settled
-      setTimeout(startSR,80);
-    })
-    .catch(err=>{
-      // Mic denied — try SR anyway (it manages its own permission)
-      console.warn('getUserMedia failed:',err.message);
-      startSR();
-    });
+  // Do NOT call getUserMedia — it steals the mic from SpeechRecognition on Android.
+  // Animate gauge synthetically instead, SR gets exclusive mic access.
+  startSyntheticGauge();
+  startSR();
 }
 
 function startSR(){
@@ -335,7 +317,6 @@ function endSpeak(){
   if(!isRecording)return;
   isRecording=false;
   stopGauge();
-  if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}
   if(recognition){try{recognition.stop();}catch(e){}}
   setBtnState('proc');
   setStatus('Processing…','proc');
