@@ -169,7 +169,6 @@ const COLORS=['#4f8ef7','#22c55e','#f59e0b','#ef4444','#a855f7','#06b6d4','#f973
 
 let targetLangs=[
   {code:'en-GB',label:'English',name:'English',color:COLORS[0]},
-  {code:'ms-MY',label:'Malay',name:'Malay',color:COLORS[1]},
 ];
 let messages=[],msgId=0,isRecording=false,isProcessing=false;
 let mediaRecorder=null,audioChunks=[],micStream=null;
@@ -349,13 +348,13 @@ async function commitAndTranslate(transcript){
     :`Translate into ${targetDesc}. Return ONLY the translation, nothing else.`;
 
   try{
-    const resp=await fetch('https://api.anthropic.com/v1/messages',{
+    const resp=await fetch('https://api.groq.com/openai/v1/chat/completions',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:600,system:sys,messages:[{role:'user',content:transcript}]})
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+GROQ_KEY},
+      body:JSON.stringify({model:'llama-3.3-70b-versatile',max_tokens:600,messages:[{role:'system',content:sys},{role:'user',content:transcript}]})
     });
     const data=await resp.json();
-    const raw=data?.content?.[0]?.text?.trim()||'';
+    const raw=data?.choices?.[0]?.message?.content?.trim()||'';
     const msg=messages.find(m=>m.id===id);
     if(msg){
       msg.translating=false;
